@@ -258,7 +258,7 @@ class NPUInference():
                                               seq_length=seq_len, 
                                               seq_offset=seq_offset, 
                                               heads=heads,
-                                              num_kv=num_kv, # num_kv > 0 ? num_kv : heads,
+                                              num_kv=num_kv if num_kv > 0 else heads, # num_kv > 0 ? num_kv : heads,
                                               rotary_dim=rotary_dim,
                                               rotate_half=rotate_half,
                                               rotate_every_two=rotate_every_two,
@@ -352,7 +352,7 @@ def test_softmax_context():
     SEQ_LENGTH = 128
     HEADS = 32
     HEAD_DIM = 256
-    NUM_KV = HEADS//2
+    NUM_KV = -1
     rotary_dim = -1
     rotate_every_two=True
     rope_theta = 0.1
