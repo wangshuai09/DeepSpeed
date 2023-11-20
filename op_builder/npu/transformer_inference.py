@@ -45,6 +45,9 @@ class InferenceContext:
 
     workSpaceSize = 0
 
+    q_pre = []
+    k_pre = []
+
     @staticmethod
     def reset_tokens(initial_tokens=1):
         InferenceContext._num_tokens = initial_tokens
@@ -221,10 +224,10 @@ class NPUInference():
             k_pos = k_pos * cos + swap_two_rows(k_pos) * sin
             k = torch.cat([k_pos, k_pass], dim=-1)
     
-        # 结果，v 不变
-        output = q.reshape(bsz, seq_length, -1)
-        k_cache= k.reshape(bsz, seq_length, -1)
-        v_cache = v
+        # 结果，v 不变, shape: [bsz, heads, seq, head_dim]
+        output = q.permute(0,2,1,3).contiguous()
+        k_cache= k.permute(0,2,1,3).contiguous()
+        v_cache = v.permute(0,2,1,3).contiguous()
         print("result:", output.shape, k_cache.shape, v_cache.shape)
         return output, k_cache, v_cache
         
@@ -246,10 +249,12 @@ class NPUInference():
         seq_offset = 0 if is_promt else soft_len - 1
         
         # 
+        print("soft_len", soft_len, "layer_id", layer_id, "num_layers", num_layers)
+
         output = torch.empty((bsz, seq_len, heads * k), dtype=torch.float16, device="npu")
         k_cache = torch.empty((bsz, seq_len, (num_kv if num_kv > 0 else heads) * k), dtype=torch.float16, device="npu")
         v_cache = torch.empty((bsz, seq_len, (num_kv if num_kv > 0 else heads) * k), dtype=torch.float16, device="npu")
-        NPUInference._bias_add_transform_0213(output=output, 
+        q, k, v = NPUInference._bias_add_transform_0213(output=output, 
                                               k_cache=k_cache, 
                                               v_cache=v_cache, 
                                               vals=query_key_value, 
@@ -263,6 +268,25 @@ class NPUInference():
                                               rotate_half=rotate_half,
                                               rotate_every_two=rotate_every_two,
                                               rope_theta=rope_theta)
+        
+        
+        output = torch_npu.npu_fusion_attention(
+            q, k, v, heads, "BSH",
+            pse=None,
+            padding_mask=None,
+            atten_mask=attn_mask.bool(),
+            scale=norm_factor,
+            pre_tockens=65536,
+            next_tockens=65536,
+            keep_prob=1,
+            inner_precise=0
+        )[0]
+
+        with torch.no_grad():
+            k = k.view(k.size(0), k.size(1), heads, -1).transpose(1, 2).contiguous()
+            v = v.view(v.size(0), v.size(1), heads, -1).transpose(1, 2).contiguous()
+        
+        return output, k, v
     
     @staticmethod
     def softmax_context_fp32(query_key_value, attn_mask, rotary_dim, 
