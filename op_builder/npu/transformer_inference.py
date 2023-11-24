@@ -71,91 +71,6 @@ class InferenceContext:
 
 class NPUInference():
 
-    @staticmethod
-    def softmax_context_int8(query, prev_key, new_key, attn_mask, prev_value, 
-                             new_value, heads, norm_factor, merging, triangular, 
-                             local_attention, window_size, no_masking):
-        pass
-                              
-    @staticmethod
-    def gated_activation(activation, bias, actFun):
-        pass
-    
-    @staticmethod
-    def layer_norm(input, gamma, beta, epsilon):
-        norm, _, _ = torch.native_layer_norm(input, [input.shape[-1]], gamma,
-                                             beta, eps=epsilon)
-        return norm
-    
-    @staticmethod
-    def _layer_norm_residual(input, bias, residual, gamma, beta, epsilon):
-        pass
-    
-    @staticmethod
-    def layer_norm_residual_store_pre_ln_res(input, bias, residual, gamma, beta,
-                                              epsilon):
-        pass
-    
-    @staticmethod
-    def layer_norm_residual_store_pre_ln_res(input, bias, residual, gamma, beta, 
-                                             epsilon):
-        pass
-    
-    @staticmethod
-    def rms_norm(input, gamma, epsilon):
-        pass
-
-    @staticmethod
-    def pre_rms_norm(input, residual, gamma, epsilon):
-        pass
-
-    @staticmethod
-    def _vector_add(a, b, gamma):
-        pass
-
-    @staticmethod
-    def apply_rotary_pos_emb(mixed_query, key_layer, rotary_dim,  offset,
-                             num_heads, rotate_half, rope_theta):
-        pass
-    
-    @staticmethod
-    def moe_res_matmul(moe_res, coef, output):
-        pass
-
-    @staticmethod
-    def reset_cache():
-        pass
-
-    @staticmethod
-    def release_workspace():
-        pass
-    
-    @staticmethod
-    def retake_workspace():
-        pass
-    
-    @classmethod
-    def _softmax(cls, attn_scores, attn_mask, alibi, triangular, recompute,
-                 local_attention, window_size, async_op, layer_scale,
-                 head_offset, mp_size):
-        pass
-
-    @staticmethod
-    def softmax_fp32(cls, attn_scores, attn_mask, alibi, triangular, recompute,
-                 local_attention, window_size, async_op, layer_scale,
-                 head_offset, mp_size):
-        return NPUInference._softmax(cls, attn_scores, attn_mask, alibi, triangular, recompute,
-                 local_attention, window_size, async_op, layer_scale,
-                 head_offset, mp_size)
-
-    @staticmethod
-    def softmax_fp16():
-        pass
-    
-    @staticmethod
-    def softmax_bf16():
-        pass
-
     @classmethod
     def _qkv_gemm(cls, input, weight, q_scale, bias, gamma, beta, epsilon,
                       add_bias, q_int8, transposed_mode):
@@ -275,7 +190,7 @@ class NPUInference():
                                               rotate_half=rotate_half,
                                               rotate_every_two=rotate_every_two,
                                               rope_theta=rope_theta)
-        
+        torch.npu.synchronize()
         try:
             if not is_promt: # use_cache
                 if not InferenceContext.kv_cache:
@@ -549,6 +464,7 @@ class NPUInference():
 
         input_dtype = hidden_state.dtype
         residual = tmp.to(input_dtype)
+        print("residual output", residual.shape)
         return residual
 
     @staticmethod
