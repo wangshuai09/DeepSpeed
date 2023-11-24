@@ -45,8 +45,7 @@ class InferenceContext:
 
     workSpaceSize = 0
 
-    q_pre = []
-    k_pre = []
+    kv_cache = None
 
     @staticmethod
     def reset_tokens(initial_tokens=1):
@@ -63,6 +62,11 @@ class InferenceContext:
     @staticmethod
     def GetMaxTokenLength():
         return InferenceContext._max_seq_len
+    
+    @staticmethod
+    def retake_workspace():
+        InferenceContext.kv_cache = None
+        return True
     
 
 class NPUInference():
@@ -149,7 +153,7 @@ class NPUInference():
         pass
     
     @staticmethod
-    def softmax_bp16():
+    def softmax_bf16():
         pass
 
     @classmethod
@@ -178,7 +182,7 @@ class NPUInference():
                       add_bias, q_int8, transposed_mode)
 
     @staticmethod
-    def qkv_gemm_bp16(input, weight, q_scale, bias, gamma, beta, epsilon,
+    def qkv_gemm_bf16(input, weight, q_scale, bias, gamma, beta, epsilon,
                       add_bias, q_int8, transposed_mode):
         return NPUInference._qkv_gemm(input, weight, q_scale, bias, gamma, beta, epsilon,
                       add_bias, q_int8, transposed_mode)
@@ -225,9 +229,12 @@ class NPUInference():
             k = torch.cat([k_pos, k_pass], dim=-1)
     
         # 结果，v 不变, shape: [bsz, heads, seq, head_dim]
-        output = q.permute(0,2,1,3).contiguous()
-        k_cache= k.permute(0,2,1,3).contiguous()
-        v_cache = v.permute(0,2,1,3).contiguous()
+        output = q.reshape(bsz, seq_length, -1).contiguous()
+        k_cache= k.reshape(bsz, seq_length, -1).contiguous()
+        v_cache = v.contiguous()
+        # output = q.permute(0,2,1,3).contiguous()
+        # k_cache= k.permute(0,2,1,3).contiguous()
+        # v_cache = v.permute(0,2,1,3).contiguous()
         print("result:", output.shape, k_cache.shape, v_cache.shape)
         return output, k_cache, v_cache
         
@@ -269,7 +276,25 @@ class NPUInference():
                                               rotate_every_two=rotate_every_two,
                                               rope_theta=rope_theta)
         
-        
+        try:
+            if not is_promt: # use_cache
+                if not InferenceContext.kv_cache:
+                    InferenceContext.kv_cache = [[None, None] for _ in range(num_layers)]
+                print(InferenceContext.kv_cache[layer_id])
+                k_cache, v_cache = InferenceContext.kv_cache[layer_id]
+                if k_cache:
+                    k = torch.cat((k_cache, k), 1)
+                    v = torch.cat((v_cache, v), 1)
+                print("k,v", [k.shape, v.shape], InferenceContext.kv_cache[layer_id]) 
+                InferenceContext.kv_cache[layer_id] = [k, v]
+            else:
+                InferenceContext.kv_cache = None
+        except:
+            import traceback
+            print("traceback", traceback.format_exc())
+
+        print(q.shape, k.shape, v.shape, heads, attn_mask.shape)
+                    
         output = torch_npu.npu_fusion_attention(
             q, k, v, heads, "BSH",
             pse=None,
@@ -282,6 +307,7 @@ class NPUInference():
             inner_precise=0
         )[0]
 
+        # [b, s, H] --> [b, s, h, k] --> [b, h, s, k]
         with torch.no_grad():
             k = k.view(k.size(0), k.size(1), heads, -1).transpose(1, 2).contiguous()
             v = v.view(v.size(0), v.size(1), heads, -1).transpose(1, 2).contiguous()
@@ -310,7 +336,7 @@ class NPUInference():
                          no_masking, layer_id, num_layers, alibi, rope_theta)
 
     @staticmethod
-    def softmax_context_bp32(query_key_value, attn_mask, rotary_dim, 
+    def softmax_context_bf16(query_key_value, attn_mask, rotary_dim, 
                          rotate_half, rotate_every_two, heads, num_kv, 
                          norm_factor, triangular, local_attention, window_size,
                          no_masking, layer_id, num_layers, alibi, rope_theta):
@@ -319,9 +345,272 @@ class NPUInference():
                          norm_factor, triangular, local_attention, window_size,
                          no_masking, layer_id, num_layers, alibi, rope_theta)
 
+    @staticmethod
+    def _vector_matmul_(input,
+                        weight,
+                        transposed_mode):
+        if transposed_mode:
+            output = torch.matmul(input, weight.t())
+        else:
+            output = torch.matmul(input, weight)
+        print("vector matmul", output.shape)
+        return output 
+        
+    
+    @staticmethod
+    def vector_matmul_fp32(input,
+                            weight,
+                            async_op,
+                            q_scale,
+                            q_int8,
+                            transposed_mode):
+        return NPUInference._vector_matmul_(input,
+                        weight,
+                        transposed_mode)
+                                
+    @staticmethod
+    def vector_matmul_fp16(input,
+                            weight,
+                            async_op,
+                            q_scale,
+                            q_int8,
+                            transposed_mode):
+        return NPUInference._vector_matmul_(input,
+                        weight,
+                        transposed_mode)
+    
+    @staticmethod
+    def vector_matmul_bf16(input,
+                            weight,
+                            async_op,
+                            q_scale,
+                            q_int8,
+                            transposed_mode):
+        return NPUInference._vector_matmul_(input,
+                        weight,
+                        transposed_mode)
+    
+    @staticmethod
+    def _mlp_gemm(input,
+                   residual,
+                   input_bias,
+                   weight_interm,
+                   weight_out,
+                   bias,
+                   gamma,
+                   beta,
+                   epsilon,
+                   preLayerNorm,
+                   mlp_after_attn,
+                   q_scale,
+                   q_scale1,
+                   q_int8,
+                   activation_type,
+                   transposed_mode):
+        print(type(input), type(residual), type(input_bias))
+        if mlp_after_attn:
+            residual_add = torch.nn.functional.layer_norm(input + residual + input_bias, (input.shape[2], ), gamma, beta, epsilon)
+        else:
+            residual_add = torch.nn.functional.layer_norm(input, (input.shape[2], ), gamma, beta,
+                                        epsilon)
+        tmp = torch.matmul(residual_add, weight_interm.t())
+        from deepspeed.utils.types import ActivationFuncType
+        if activation_type == ActivationFuncType.GELU:
+            tmp = torch.nn.functional.gelu(tmp + bias)
+        elif activation_type == ActivationFuncType.ReLU:
+            tmp = torch.nn.functional.relu(tmp + bias)
+        output = torch.matmul(tmp, weight_out.t())
+        return output, residual_add    
+    
+    @staticmethod
+    def mlp_gemm_fp32(input,
+                   residual,
+                   input_bias,
+                   weight_interm,
+                   weight_out,
+                   bias,
+                   gamma,
+                   beta,
+                   epsilon,
+                   preLayerNorm,
+                   mlp_after_attn,
+                   q_scale,
+                   q_scale1,
+                   q_int8,
+                   activation_type,
+                   transposed_mode):
+        return NPUInference._mlp_gemm(input,
+                   residual,
+                   input_bias,
+                   weight_interm,
+                   weight_out,
+                   bias,
+                   gamma,
+                   beta,
+                   epsilon,
+                   preLayerNorm,
+                   mlp_after_attn,
+                   q_scale,
+                   q_scale1,
+                   q_int8,
+                   activation_type,
+                   transposed_mode)
 
-        
-        
+    @staticmethod
+    def mlp_gemm_fp16(input,
+                   residual,
+                   input_bias,
+                   weight_interm,
+                   weight_out,
+                   bias,
+                   gamma,
+                   beta,
+                   epsilon,
+                   preLayerNorm,
+                   mlp_after_attn,
+                   q_scale,
+                   q_scale1,
+                   q_int8,
+                   activation_type,
+                   transposed_mode):
+        return NPUInference._mlp_gemm(input,
+                   residual,
+                   input_bias,
+                   weight_interm,
+                   weight_out,
+                   bias,
+                   gamma,
+                   beta,
+                   epsilon,
+                   preLayerNorm,
+                   mlp_after_attn,
+                   q_scale,
+                   q_scale1,
+                   q_int8,
+                   activation_type,
+                   transposed_mode)
+
+    @staticmethod
+    def mlp_gemm_bf16(input,
+                   residual,
+                   input_bias,
+                   weight_interm,
+                   weight_out,
+                   bias,
+                   gamma,
+                   beta,
+                   epsilon,
+                   preLayerNorm,
+                   mlp_after_attn,
+                   q_scale,
+                   q_scale1,
+                   q_int8,
+                   activation_type,
+                   transposed_mode):
+        return NPUInference._mlp_gemm(input,
+                   residual,
+                   input_bias,
+                   weight_interm,
+                   weight_out,
+                   bias,
+                   gamma,
+                   beta,
+                   epsilon,
+                   preLayerNorm,
+                   mlp_after_attn,
+                   q_scale,
+                   q_scale1,
+                   q_int8,
+                   activation_type,
+                   transposed_mode)
+
+    @staticmethod
+    def _residual_add_bias(hidden_state,
+                           residual,
+                           attention_output,
+                           attention_bias,
+                           final_bias,
+                           mp_size,
+                           mlp_after_attn,
+                           add_bias,
+                           preln):
+        if mlp_after_attn:
+            if preln:
+                # residual = (residual + attention + bias + attention_bias) *
+                # mp_scale + hidden_state
+                tmp = (residual + attention_output + attention_bias + final_bias) / mp_size + hidden_state
+            else:
+                # residual += hidden_state + bias
+                tmp = residual + hidden_state + final_bias
+        else:
+            if add_bias:
+                residual += attention_bias   
+            tmp = hidden_state + attention_output + (residual + final_bias) * mp_size
+
+        input_dtype = hidden_state.dtype
+        residual = tmp.to(input_dtype)
+        return residual
+
+    @staticmethod
+    def residual_add_bias_fp32(hidden_state,
+                           residual,
+                           attention_output,
+                           attention_bias,
+                           final_bias,
+                           mp_size,
+                           mlp_after_attn,
+                           add_bias,
+                           preln):
+        return NPUInference._residual_add_bias(hidden_state,
+                           residual,
+                           attention_output,
+                           attention_bias,
+                           final_bias,
+                           mp_size,
+                           mlp_after_attn,
+                           add_bias,
+                           preln)
+
+    @staticmethod
+    def residual_add_bias_fp16(hidden_state,
+                           residual,
+                           attention_output,
+                           attention_bias,
+                           final_bias,
+                           mp_size,
+                           mlp_after_attn,
+                           add_bias,
+                           preln):
+        return NPUInference._residual_add_bias(hidden_state,
+                           residual,
+                           attention_output,
+                           attention_bias,
+                           final_bias,
+                           mp_size,
+                           mlp_after_attn,
+                           add_bias,
+                           preln)
+
+    @staticmethod
+    def residual_add_bias_bf16(hidden_state,
+                           residual,
+                           attention_output,
+                           attention_bias,
+                           final_bias,
+                           mp_size,
+                           mlp_after_attn,
+                           add_bias,
+                           preln):
+        return NPUInference._residual_add_bias(hidden_state,
+                           residual,
+                           attention_output,
+                           attention_bias,
+                           final_bias,
+                           mp_size,
+                           mlp_after_attn,
+                           add_bias,
+                           preln)
+
 class InferenceBuilder(NPUOpBuilder):
     BUILD_VAR = "DS_BUILD_TRANSFORMER_INFERENCE"
     NAME = "transformer_inference"
