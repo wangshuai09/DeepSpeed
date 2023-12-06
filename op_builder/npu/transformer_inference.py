@@ -371,27 +371,20 @@ class NPUInference():
                    q_int8,
                    activation_type,
                    transposed_mode):
-        # print(type(input), type(residual), type(input_bias))
-        # if mlp_after_attn:
-        #     residual_add = torch.nn.functional.layer_norm(input + residual + input_bias, (input.shape[2], ), gamma, beta, epsilon)
-        # else:
-        #     residual_add = torch.nn.functional.layer_norm(input, (input.shape[2], ), gamma, beta,
-        #                                 epsilon)
-        # tmp = torch.matmul(residual_add, weight_interm.t())
-        # from deepspeed.utils.types import ActivationFuncType
-        # if activation_type == ActivationFuncType.GELU:
-        #     tmp = torch.nn.functional.gelu(tmp + bias)
-        # elif activation_type == ActivationFuncType.ReLU:
-        #     tmp = torch.nn.functional.relu(tmp + bias)
-        # output = torch.matmul(tmp, weight_out.t())
-        # return output, residual_add    
-        residual_add = torch.nn.functional.layer_norm(input + residual + input_bias, (input.shape[2],), gamma, beta,
-                                                      epsilon)
+        if mlp_after_attn:
+            residual_add = torch.nn.functional.layer_norm(input + residual + input_bias, (input.shape[2], ), gamma, beta, epsilon)
+        else:
+            residual_add = torch.nn.functional.layer_norm(input, (input.shape[2], ), gamma, beta,
+                                        epsilon)
         tmp = torch.matmul(residual_add, weight_interm.t())
-        tmp = torch.nn.functional.gelu(tmp + bias)
+        from deepspeed.utils.types import ActivationFuncType
+        if activation_type == ActivationFuncType.GELU:
+            tmp = torch.nn.functional.gelu(tmp + bias)
+        elif activation_type == ActivationFuncType.ReLU:
+            tmp = torch.nn.functional.relu(tmp + bias)
         output = torch.matmul(tmp, weight_out.t())
         return output, residual_add
-    
+
     @staticmethod
     def mlp_gemm_fp32(input,
                    residual,
