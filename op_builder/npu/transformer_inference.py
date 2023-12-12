@@ -154,7 +154,7 @@ class NPUInference():
         # rope 位置编码, npu 
         if rotary_dim > 0 and rotate_every_two:
             # sin, cos may use cache
-            seq_id = torch.arange(0, seq_length).to("npu")
+            seq_id = torch.arange(0, seq_length).to("npu") + seq_offset
             inv_freq = torch.arange(0, rotary_dim , 2) / rotary_dim
             inv_freq = inv_freq.to("npu")
             inv_freq = 1.0 / torch.pow(rope_theta, inv_freq)
