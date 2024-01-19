@@ -494,7 +494,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.grad_partitions_flat_buffer: Tensor = torch.zeros(sum(p.partition_numel() for p in all_params),
                                                                dtype=self.gradient_accumulation_dtype,
-                                                               device=self.device)
+                                                               device=get_accelerator().current_device_name())
         if self.offload_optimizer_pin_memory:
             self.grad_partitions_flat_buffer = get_accelerator().pin_memory(self.grad_partitions_flat_buffer)
 
